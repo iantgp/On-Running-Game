@@ -267,4 +267,44 @@ export class GameAudio {
     this.osc('sine', hz(43), t, 0.2, this.env(t, 0.1, 0.005, 0.18, this.sfx));
     this.osc('sine', hz(48), t + 0.12, 0.25, this.env(t + 0.12, 0.1, 0.005, 0.22, this.sfx));
   }
+
+  /** Count-in tick on the beat; a higher chord on GO. */
+  count(go: boolean): void {
+    const t = this.now();
+    if (t === null) return;
+    const notes = go ? [24, 28, 31] : [19];
+    for (const n of notes) this.osc('triangle', hz(n + 24), t, 0.2, this.env(t, 0.12, 0.003, 0.18, this.sfx));
+  }
+
+  whoosh(): void {
+    const t = this.now();
+    if (t === null) return;
+    this.noiseBurst(t, 0.12, 'bandpass', 1600, this.env(t, 0.06, 0.01, 0.1, this.sfx));
+  }
+
+  slide(): void {
+    const t = this.now();
+    if (t === null) return;
+    this.noiseBurst(t, 0.3, 'lowpass', 900, this.env(t, 0.12, 0.02, 0.26, this.sfx));
+  }
+
+  /** Approaching traffic: the Zürich tram's two-tone bell, or a bus horn. */
+  vehicle(tram: boolean): void {
+    const t = this.now();
+    if (t === null) return;
+    if (tram) {
+      for (const offset of [0, 0.22]) {
+        for (const f of [1568, 2350]) this.osc('sine', f, t + offset, 0.5, this.env(t + offset, 0.07, 0.002, 0.45, this.sfx));
+      }
+    } else {
+      for (const f of [311, 392]) this.osc('sawtooth', f, t, 0.45, this.env(t, 0.05, 0.02, 0.4, this.sfx));
+    }
+  }
+
+  /** Short rising flourish when entering a new zone. */
+  zone(): void {
+    const t = this.now();
+    if (t === null) return;
+    [12, 16, 19, 24].forEach((s, i) => this.osc('sine', hz(s + 24), t + i * 0.07, 0.35, this.env(t + i * 0.07, 0.08, 0.005, 0.3, this.sfx)));
+  }
 }
