@@ -1,15 +1,19 @@
 import * as THREE from 'three';
 import { GRIP_DYNAMICS, GRIP_RANK, LANES, laneToX, type GripLevel } from './config/gameplay';
 import { RUNNERS, runnerById, type RunnerConfig } from './config/runners';
-import { SHOES, bestShoeFor, type ShoeId } from './config/shoes';
+import { BRAND } from './config/brand';
+import { PERKS, SHOES, perkValue, shoeGrip, shoeRebound, shortShoeName, slotFor, type PerkId, type ShoeId, type ShoeSlot } from './config/shoes';
 import { HAZARD_MIN_GRIP, type HazardKind, type WeatherId } from './config/weather';
 import { clamp, damp, lerp } from './core/math';
 import { createRng, randomSeed, type Rng } from './core/random';
 import { beatError, judgeLanding, type Judgement } from './sim/rhythm';
 import { GameAudio } from './audio';
+import { Progress } from './progress';
+import { RunTracker } from './stats';
 import { Hud } from './hud';
 import { Effects } from './world/effects';
 import { createObstacle, type ObstacleType } from './world/obstacles';
+import { PickupView, type Pickup, type PickupKind } from './world/pickups';
 import { Runner, type RunnerPose } from './world/runner';
 import { Scenery } from './world/scenery';
 import { Sky } from './world/sky';
@@ -44,16 +48,26 @@ const GLIDE_PER_PERFECT = 0.34;
 const GLIDE_PER_GOOD = 0.15;
 /** Oncoming trams and buses drive towards the runner at this speed (m/s). */
 const ONCOMING_SPEED = 7;
-const STORAGE = { best: 'cloudtec.best', runner: 'cloudtec.runner' } as const;
+const STORAGE = { runner: 'cloudtec.runner' } as const;
+/** CloudTec Surge power-up: duration (s) and the auto super-jump height (m). */
+const SURGE_SEC = 7;
+const SUPER_JUMP_H = 3.9;
+/** Distance between Surge power-ups (m). */
+const SURGE_SPACING: [number, number] = [320, 480];
+const POD_VALUE = { pod: 1, eco: 10, badge: 25, surge: 0 } as const;
+const ECO_CHANCE = 0.03;
+const BADGE_CHANCE = 0.006;
+const ECO_MESSAGES = ['Run lighter on the planet', 'Every stride counts', 'Recycle your runners', 'Take the tram home'];
 
 /** Dev-only helpers: `?at=<metres>` starts a run further along, `?god` disables crashes. */
 const DEV_PARAMS = import.meta.env.DEV ? new URLSearchParams(location.search) : null;
 const DEV_START = Math.max(0, Number(DEV_PARAMS?.get('at') ?? 0) || 0);
 const DEV_GOD = DEV_PARAMS?.has('god') ?? false;
+const DEV_SURGE = DEV_PARAMS?.has('surge') ?? false;
 
 type Mode = 'run' | 'jump' | 'slam' | 'slide' | 'glide' | 'dead';
 type State = 'menu' | 'run' | 'paused' | 'over';
-type Action = 'left' | 'right' | 'jump' | 'slide' | ShoeId;
+type Action = 'left' | 'right' | 'jump' | 'slide' | ShoeSlot;
 
 /**
  * Obstacle patterns on the beat grid (rows near → far, one char per lane):
@@ -100,7 +114,6 @@ interface Obstacle {
   tram: boolean;
   mesh: THREE.Object3D;
 }
-interface CloudPickup { lane: number; s: number; y: number; mesh: THREE.Object3D; taken: boolean }
 interface Hazard { kind: HazardKind; lane: number; s0: number; s1: number; done: boolean; mesh: THREE.Mesh }
 
 const RAIN_TINT = new THREE.Color(0x6f7a86);
@@ -154,9 +167,10 @@ export class Game {
   private runnerConfig: RunnerConfig;
   private readonly audio = new GameAudio();
   private readonly hud: Hud;
+  private readonly progress = new Progress();
+  private readonly tracker = new RunTracker();
+  private readonly pickupView: PickupView;
   private readonly shared = {
-    cloudGeo: new THREE.SphereGeometry(0.32, 12, 10),
-    cloudMat: new THREE.MeshLambertMaterial({ color: 0xffffff, emissive: 0x8fa6bf }),
     puddle: new THREE.MeshPhongMaterial({ color: 0x5d7690, shininess: 90, specular: 0xaaaaaa, transparent: true, opacity: 0.85 }),
     ice: new THREE.MeshPhongMaterial({ color: 0xcdeeff, shininess: 120, specular: 0xffffff, transparent: true, opacity: 0.9 }),
     hazardGeo: new THREE.CircleGeometry(1, 20),
@@ -167,7 +181,7 @@ export class Game {
   private state: State = 'menu';
   private rng: Rng = createRng(1);
   private obstacles: Obstacle[] = [];
-  private clouds: CloudPickup[] = [];
+  private pickups: Pickup[] = [];
   private hazards: Hazard[] = [];
   private input: { type: Action; time: number }[] = [];
 
@@ -193,15 +207,21 @@ export class Game {
   private strikes: number[] = [];
   private deadTime = 0;
   private time = 0;
-  private shoe: ShoeId = 'road';
+  private shoe: ShoeId = 'cloudboom';
   private glideCharge = 0;
   private score = 0;
   private combo = 0;
   private maxCombo = 0;
   private perfects = 0;
-  private cloudCount = 0;
-  private cloudStreak = 0;
-  private lastCloudTime = 0;
+  private podCount = 0;
+  private podStreak = 0;
+  private lastPodTime = 0;
+  private surgeTime = 0;
+  private surgeDuration = SURGE_SEC;
+  /** Stays invulnerable until touchdown after a Surge ends mid-air. */
+  private surgeGrace = false;
+  private nextSurgeAt = 0;
+  private jumpH = JUMP_H;
   private nextRow = 0;
   private restRows = 0;
   /** Row index until which each lane is kept clear for oncoming traffic. */
@@ -214,7 +234,6 @@ export class Game {
   private lastBeatIndex = 0;
   private runStartBeat = 0;
   private readonly hintsShown = new Set<string>();
-  private best = 0;
 
   // Presentation state.
   private acc = 0;
@@ -259,7 +278,8 @@ export class Game {
     this.markings = { zurich: roadMarkingsTexture('zurich'), alps: roadMarkingsTexture('alps'), newyork: roadMarkingsTexture('newyork') };
     this.linesMat = new THREE.MeshBasicMaterial({ map: this.markings.zurich, transparent: true, depthWrite: false });
     this.effects = new Effects(this.dot, this.camera);
-    this.scene.add(this.effects.group);
+    this.pickupView = new PickupView(this.dot);
+    this.scene.add(this.effects.group, this.pickupView.group);
 
     this.runnerConfig = runnerById(readStorage(STORAGE.runner));
     this.runner = new Runner(this.runnerConfig.look, this.dot);
@@ -267,16 +287,18 @@ export class Game {
 
     this.hud = new Hud(uiRoot, {
       onPlay: () => this.startRun(),
-      onShoe: (shoe) => this.queue(shoe, performance.now()),
+      onShoe: (slot) => this.queue(slot, performance.now()),
+      onLocker: () => this.hud.showLocker(this.progress.state),
+      onLockerAction: (action, id) => this.lockerAction(action, id),
       onPause: () => this.togglePause(),
       onRunner: (direction) => this.cycleRunner(direction),
       onMenu: () => this.toMenu(),
     });
 
     this.buildRoad();
-    this.best = Number(readStorage(STORAGE.best) ?? 0) || 0;
     this.resetRun(false);
-    this.hud.showMenu(this.best, this.runnerConfig);
+    this.hud.setLoadout(this.progress.state.loadout);
+    this.hud.showMenu(this.progress.state, this.runnerConfig);
     this.bindInput(canvas);
     window.addEventListener('resize', () => this.resize());
     document.addEventListener('visibilitychange', () => {
@@ -344,10 +366,10 @@ export class Game {
 
   private resetRun(playing: boolean): void {
     for (const o of this.obstacles) this.scene.remove(o.mesh);
-    for (const c of this.clouds) this.scene.remove(c.mesh);
+    for (const p of this.pickups) this.pickupView.detach(p);
     for (const h of this.hazards) this.scene.remove(h.mesh);
     this.obstacles = [];
-    this.clouds = [];
+    this.pickups = [];
     this.hazards = [];
     this.input = [];
     this.rng = createRng(randomSeed());
@@ -371,7 +393,10 @@ export class Game {
     this.combo = 0;
     this.maxCombo = 0;
     this.perfects = 0;
-    this.cloudCount = 0;
+    this.podCount = 0;
+    this.surgeTime = 0;
+    this.surgeGrace = false;
+    this.jumpH = JUMP_H;
     this.nextRow = Math.ceil(this.distance / BEAT_LEN) + 8; // two bars of warm-up and count-in
     this.restRows = 0;
     this.reserved = [0, 0, 0];
@@ -380,41 +405,62 @@ export class Game {
     this.zoneIndex = zoneIndexAt(this.distance);
     this.lastBeatIndex = Math.floor(this.beat);
     this.runStartBeat = Math.floor(this.beat);
+    this.nextSurgeAt = this.distance + (DEV_SURGE ? 70 : 260);
     this.setShoe('road', false);
+    this.runner.setSurge(0);
     this.audio.resetMusic();
     this.scenery.reset(this.distance);
+    this.tracker.reset(this.distance, locationAt(this.distance));
   }
 
   private startRun(): void {
     this.audio.unlock();
     this.resetRun(true);
     this.state = 'run';
+    this.hud.setLoadout(this.progress.state.loadout);
     this.hud.showRun();
   }
 
   private toMenu(): void {
     this.resetRun(false);
     this.state = 'menu';
-    this.hud.showMenu(this.best, this.runnerConfig);
+    this.hud.showMenu(this.progress.state, this.runnerConfig);
+  }
+
+  private lockerAction(action: 'unlock' | 'upgrade' | 'equip', id: ShoeId): void {
+    const done = action === 'unlock' ? this.progress.unlock(id) : action === 'upgrade' ? this.progress.upgrade(id) : this.progress.equip(id);
+    this.audio.unlock();
+    if (done) {
+      if (action === 'equip') this.audio.shoe();
+      else this.audio.purchase();
+      this.runner.setShoe(id);
+    }
+    this.hud.showLocker(this.progress.state);
+    this.hud.setLoadout(this.progress.state.loadout);
+    this.hud.showMenu(this.progress.state, this.runnerConfig, false);
   }
 
   private endRun(): void {
     this.state = 'over';
-    const newBest = this.score > this.best;
-    if (newBest) {
-      this.best = Math.floor(this.score);
-      writeStorage(STORAGE.best, String(this.best));
-    }
+    const report = this.tracker.finish(BEAT_LEN);
+    const bestBefore = this.progress.state.best;
+    const newBest = this.progress.addRun({
+      score: this.score,
+      distance: report.distance,
+      pods: report.pods + report.ecoTokens * POD_VALUE.eco + report.badges * POD_VALUE.badge,
+      ecoTokens: report.ecoTokens,
+      badges: report.badges,
+    });
     window.setTimeout(() => {
-      this.hud.showGameOver({
+      this.hud.showSummary({
+        report,
         score: Math.floor(this.score),
-        distance: this.distance,
-        clouds: this.cloudCount,
-        perfects: this.perfects,
-        maxCombo: this.maxCombo,
-        zone: locationAt(this.distance),
-        best: this.best,
+        best: Math.max(bestBefore, Math.floor(this.score)),
         newBest,
+        wallet: this.progress.state.pods,
+        runner: this.runnerConfig.name,
+        shoe: shortShoeName(this.shoe),
+        startedAt: new Date(Date.now() - report.time * 1000),
       });
     }, 900);
   }
@@ -512,22 +558,32 @@ export class Game {
   }
 
   private get grip(): GripLevel {
-    return SHOES[this.shoe].grip[this.weather];
+    return shoeGrip(this.shoe, this.weather);
   }
 
   private get multiplier(): number {
     return Math.min(10, 1 + Math.floor(this.combo / 4));
   }
 
-  private setShoe(shoe: ShoeId, announce = true): void {
+  private setShoe(slot: ShoeSlot, announce = true): void {
+    const shoe = this.progress.state.loadout[slot];
     if (shoe === this.shoe && announce) return;
     this.shoe = shoe;
     this.runner.setShoe(shoe);
     if (announce) {
       this.audio.shoe();
-      this.hud.flash(SHOES[shoe].shortName, 'good', SHOES[shoe].tagline, 0.9);
+      this.hud.flash(shortShoeName(shoe), 'good', PERKS[SHOES[shoe].perk].name, 0.9);
       this.effects.burst(this.x, 0.15, this.distance, SHOES[shoe].colors.accent, 14, 2.5, 0.18, 0.5);
     }
+  }
+
+  /** Strength of a passive perk from the shoe currently worn (0 if it has another perk). */
+  private perk(id: PerkId): number {
+    return SHOES[this.shoe].perk === id ? perkValue(this.shoe, this.progress.level(this.shoe)) : 0;
+  }
+
+  private get surging(): boolean {
+    return this.surgeTime > 0;
   }
 
   private step(dt: number): void {
@@ -564,18 +620,66 @@ export class Game {
     }
 
     // Lateral spring: grip sets stiffness and damping, so the wrong shoes feel slippery.
-    const { omega, zeta } = GRIP_DYNAMICS[this.grip];
+    const dynamics = GRIP_DYNAMICS[this.grip];
+    const omega = dynamics.omega * (1 + this.perk('agility'));
+    const zeta = dynamics.zeta;
     this.vx += (omega * omega * (laneToX(this.lane) - this.x) - 2 * zeta * omega * this.vx) * dt;
     this.x += this.vx * dt;
     this.stumbleTimer = Math.max(0, this.stumbleTimer - dt);
 
+    this.updateSurge(dt);
     this.updateVertical(dt);
     this.generate();
+    this.magnetize(dt);
     this.collide(prevDistance, prevX, prevY);
+    this.tracker.tick(dt, this.distance, this.speed, locationAt(this.distance), zoneAt(this.distance).key === 'alps');
     this.updateWeather();
     this.updateZone();
     this.onBeat();
     this.cleanup();
+  }
+
+  private updateSurge(dt: number): void {
+    if (this.surgeTime <= 0) return;
+    this.surgeTime -= dt;
+    if (Math.random() < dt * 30) {
+      this.effects.spawn({ x: this.x + (Math.random() - 0.5) * 0.4, y: this.y + 0.1, s: this.distance + 0.1, vs: -0.6, vy: 0.3, life: 0.35, size: 0.14, color: Math.random() < 0.5 ? 0xd4ff3a : 0xffffff, grow: 0.1 });
+    }
+    if (this.surgeTime <= 0) {
+      this.surgeTime = 0;
+      this.surgeGrace = this.mode !== 'run' && this.mode !== 'slide';
+      this.runner.setSurge(0);
+      this.hud.flash(`${BRAND.tech} Surge over`, 'good', '', 0.8);
+    }
+  }
+
+  private startSurge(): void {
+    this.surgeDuration = SURGE_SEC * (1 + this.perk('endurance'));
+    this.surgeTime = this.surgeDuration;
+    this.tracker.surges++;
+    this.runner.setSurge(1);
+    this.audio.surge();
+    vibrate([20, 30, 20]);
+    this.hud.flash(`${BRAND.tech} SURGE`, 'perfect', 'Pods inflated · auto super-jumps', 1.4);
+    this.effects.burst(this.x, 0.3, this.distance, 0xd4ff3a, 22, 4, 0.35, 0.7);
+    this.effects.shockwave(this.x, this.distance, 0xd4ff3a);
+  }
+
+  /** Cloud Pods drift towards the runner within the magnet radius. */
+  private magnetize(dt: number): void {
+    const radius = this.perk('magnet') + (this.surging ? 1.5 : 0);
+    if (radius <= 0) return;
+    const cy = this.y + 0.9;
+    for (const p of this.pickups) {
+      if (p.taken || p.kind !== 'pod') continue;
+      const dx = this.x - p.x;
+      const ds = this.distance - p.s;
+      if (ds > 1 || ds < -radius * 1.5 || Math.abs(dx) > radius + 1.2) continue;
+      const pull = 1 - Math.exp(-10 * dt);
+      p.x += dx * pull;
+      p.s += ds * pull * 0.8;
+      p.y += (cy - p.y) * pull;
+    }
   }
 
   /** Per-beat events: count-in, footstrike puffs and oncoming-traffic warnings. */
@@ -590,8 +694,10 @@ export class Game {
       this.hud.flash(labels[sinceStart - 1]!, go ? 'perfect' : 'count', go ? 'Land on the beat' : '', 0.32);
       this.audio.count(go);
     }
+    if (DEV_SURGE && sinceStart === 8) this.startSurge();
     if (sinceStart === 6) this.hud.zoneCard(ZONE_THEMES[this.zoneIndex]!.name, locationAt(this.distance));
     if (sinceStart === 12) this.hud.showHint('Swipe ↑ to jump, ↓ to slide, ← → to switch lanes', 2.6);
+    if (this.surging && (this.mode === 'run' || this.mode === 'slide')) this.startJump(index);
     if (this.mode === 'run') {
       const foot = index % 2 === 0 ? -1 : 1;
       const dry = this.weather === 'dry';
@@ -650,11 +756,16 @@ export class Game {
     this.input.length = 0;
   }
 
+  private startJump(takeoff: number): void {
+    this.mode = 'jump';
+    this.takeoffBeat = takeoff;
+    this.jumpH = this.surging ? SUPER_JUMP_H : JUMP_H;
+    this.audio.jump();
+  }
+
   private tryJump(takeoff: number): void {
     if (this.mode === 'run' || this.mode === 'slide') {
-      this.mode = 'jump';
-      this.takeoffBeat = takeoff;
-      this.audio.jump();
+      this.startJump(takeoff);
       return;
     }
     if ((this.mode === 'jump' || this.mode === 'slam') && this.glideCharge >= 1) {
@@ -678,7 +789,7 @@ export class Game {
     if (this.mode === 'jump') {
       const p = (beat - this.takeoffBeat) / JUMP_BEATS;
       if (p >= 1) this.land(this.takeoffBeat + JUMP_BEATS, false);
-      else this.y = 4 * JUMP_H * p * (1 - p);
+      else this.y = 4 * this.jumpH * p * (1 - p);
     } else if (this.mode === 'slam') {
       this.y -= SLAM_SPEED * dt;
       if (this.y <= 0) this.land(beat + (this.y / SLAM_SPEED) * this.bps, false);
@@ -706,13 +817,13 @@ export class Game {
     }
     if (judgement === 'perfect') {
       this.perfects++;
-      this.boost = Math.min(0.2, this.boost + 0.08 * SHOES[this.shoe].rebound[this.weather]);
-      if (!fromGlide) this.glideCharge = Math.min(1, this.glideCharge + GLIDE_PER_PERFECT);
+      this.boost = Math.min(0.24, this.boost + 0.08 * shoeRebound(this.shoe, this.weather) * (1 + this.perk('rebound')));
+      if (!fromGlide && !this.surging) this.glideCharge = Math.min(1, this.glideCharge + GLIDE_PER_PERFECT * (1 + this.perk('bounce')));
       this.effects.shockwave(this.x, this.distance, 0xd4ff3a);
       this.effects.burst(this.x, 0.1, this.distance, 0xffffff, 12, 2.6, 0.32, 0.5);
       vibrate(12);
     } else if (judgement === 'good') {
-      this.glideCharge = Math.min(1, this.glideCharge + GLIDE_PER_GOOD);
+      if (!this.surging) this.glideCharge = Math.min(1, this.glideCharge + GLIDE_PER_GOOD * (1 + this.perk('bounce')));
       this.effects.shockwave(this.x, this.distance, 0x38d6ff);
     }
     if (this.combo > 0 && this.combo % 10 === 0) this.hud.flash(`${this.combo} COMBO`, 'perfect', `x${this.multiplier} multiplier`, 1);
@@ -721,9 +832,15 @@ export class Game {
       this.hintsShown.add('glide');
       this.hud.showHint('Glide ready! Jump, then swipe ↑ again mid-air', 3);
     }
+    this.tracker.landing(judgement, this.combo);
     this.audio.land(judgement);
     this.runner.land();
-    if (this.bufferedJump) {
+    this.surgeGrace = false;
+    if (this.surging) {
+      this.bufferedJump = false;
+      this.slideAfterSlam = false;
+      this.startJump(beat); // Surge: bounce straight into the next super-jump
+    } else if (this.bufferedJump) {
       this.bufferedJump = false;
       this.mode = 'jump';
       this.takeoffBeat = beat; // rebound: take off exactly at touchdown
@@ -776,11 +893,24 @@ export class Game {
   private restRow(row: number): void {
     const free = [0, 1, 2].filter((lane) => row >= this.reserved[lane]!);
     if (free.length === 0) return;
-    if (this.rng.chance(0.35)) {
-      const lane = this.rng.pick(free);
-      for (const half of [0, 0.5]) this.addCloud(lane, (row + half) * BEAT_LEN, 1);
-    }
     const s = row * BEAT_LEN;
+    if (s >= this.nextSurgeAt) {
+      this.addPickup('surge', laneToX(this.rng.pick(free)), 1.2, s);
+      this.nextSurgeAt = s + this.rng.range(SURGE_SPACING[0], SURGE_SPACING[1]);
+      return;
+    }
+    if (this.rng.chance(BADGE_CHANCE)) {
+      this.addPickup('badge', laneToX(this.rng.pick(free)), 1.2, s);
+      return;
+    }
+    if (this.rng.chance(ECO_CHANCE * (1 + this.perk('trailsense')))) {
+      this.addPickup('eco', laneToX(this.rng.pick(free)), 1.1, s);
+      return;
+    }
+    if (this.rng.chance(0.4)) {
+      const lane = this.rng.pick(free);
+      for (const half of [0, 0.5]) this.addPod(lane, (row + half) * BEAT_LEN, 1);
+    }
     const w = this.weatherAt(s);
     if (w !== 'dry' && this.rng.chance(0.3)) {
       const kind: HazardKind = w === 'rain' ? 'puddle' : 'ice';
@@ -798,7 +928,7 @@ export class Game {
   private emitPattern(startRow: number, rows: string[]): void {
     // Cloud trail along a lane that is never blocked, hinting the path.
     const freeLanes = [0, 1, 2].filter((l) => rows.every((r) => r[l] !== '#' && r[l] !== '<') && startRow >= this.reserved[l]!);
-    const cloudLane = freeLanes.length > 0 && this.rng.chance(0.75) ? this.rng.pick(freeLanes) : -1;
+    const podLane = freeLanes.length > 0 && this.rng.chance(0.75) ? this.rng.pick(freeLanes) : -1;
 
     for (let lane = 0; lane < 3; lane++) {
       let blockStart = -1;
@@ -816,12 +946,12 @@ export class Game {
         if (cell === '-') this.addObstacle('low', lane, row * BEAT_LEN - 0.25, row * BEAT_LEN + 0.25, 0);
         if (cell === '=') this.addObstacle('high', lane, row * BEAT_LEN - 0.3, row * BEAT_LEN + 0.3, 0);
         if (cell === '<') this.addOncoming(lane, row);
-        if (lane === cloudLane && i < rows.length) {
+        if (lane === podLane && i < rows.length) {
           const y = cell === '-' ? JUMP_H + 0.9 : cell === '=' ? 0.5 : 1;
-          this.addCloud(lane, row * BEAT_LEN, y);
+          this.addPod(lane, row * BEAT_LEN, y);
           if (cell === '-') {
-            this.addCloud(lane, (row - 0.5) * BEAT_LEN, 0.75 * JUMP_H + 0.9);
-            this.addCloud(lane, (row + 0.5) * BEAT_LEN, 0.75 * JUMP_H + 0.9);
+            this.addPod(lane, (row - 0.5) * BEAT_LEN, 0.75 * JUMP_H + 0.9);
+            this.addPod(lane, (row + 0.5) * BEAT_LEN, 0.75 * JUMP_H + 0.9);
           }
         }
       }
@@ -849,24 +979,21 @@ export class Game {
     this.obstacles.push({ type, lane, s0, s1, prevS0: s0, y0, y1, vel, hit: false, announced: false, tram: visual.tram, mesh: visual.object });
   }
 
-  private addCloud(lane: number, s: number, y: number): void {
-    const group = new THREE.Group();
-    for (const [x, yy, r] of [[0, 0, 1], [0.28, -0.05, 0.75], [-0.28, -0.05, 0.75]] as const) {
-      const puff = new THREE.Mesh(this.shared.cloudGeo, this.shared.cloudMat);
-      puff.position.set(x, yy, 0);
-      puff.scale.setScalar(r);
-      group.add(puff);
-    }
-    group.position.set(laneToX(lane), y, 0);
-    this.scene.add(group);
-    this.clouds.push({ lane, s, y, mesh: group, taken: false });
+  private addPod(lane: number, s: number, y: number): void {
+    this.addPickup('pod', laneToX(lane), y, s);
+  }
+
+  private addPickup(kind: PickupKind, x: number, y: number, s: number): void {
+    const pickup: Pickup = { kind, x, y, s, taken: false, handle: -1, mesh: null };
+    this.pickupView.attach(pickup);
+    this.pickups.push(pickup);
   }
 
   private spawnSkyTrail(): void {
     let lane = this.lane;
     for (let b = Math.ceil(this.beat) + 1; b < this.glideEnd - 1; b += 0.5) {
       if (b % 2 === 0 && this.rng.chance(0.6)) lane = clamp(lane + this.rng.pick([-1, 1]), 0, 2);
-      this.addCloud(lane, b * BEAT_LEN, GLIDE_H + 0.9);
+      this.addPod(lane, b * BEAT_LEN, GLIDE_H + 0.9);
     }
   }
 
@@ -881,7 +1008,7 @@ export class Game {
       const ox = laneToX(o.lane);
       const halfW = o.type === 'high' ? 1.1 : o.type === 'low' ? 1.0 : 1.025;
       const overlap = s1 > o.s0 && s0 < o.s1 && Math.abs(this.x - ox) < HALF_W + halfW && this.y + h > o.y0 && this.y < o.y1;
-      if (!overlap || this.mode === 'glide' || DEV_GOD) continue;
+      if (!overlap || this.mode === 'glide' || this.surging || this.surgeGrace || DEV_GOD) continue;
       o.hit = true;
       if (prevDistance + HALF_D <= o.prevS0 + 1e-3) {
         this.crash();
@@ -892,21 +1019,13 @@ export class Game {
       if (this.isDead) return;
     }
 
-    for (const c of this.clouds) {
-      if (c.taken) continue;
-      if (Math.abs(c.s - this.distance) < 0.9 && Math.abs(laneToX(c.lane) - this.x) < 1.0 && c.y > this.y - 0.4 && c.y < this.y + h + 0.4) {
-        c.taken = true;
-        c.mesh.visible = false;
-        this.cloudStreak = this.time - this.lastCloudTime < 0.6 ? this.cloudStreak + 1 : 0;
-        this.lastCloudTime = this.time;
-        this.cloudCount++;
-        this.score += 10 * this.multiplier;
-        this.audio.collect(this.cloudStreak);
-        this.effects.burst(laneToX(c.lane), c.y, c.s, 0xffe58a, 6, 1.6, 0.14, 0.35);
-      }
+    for (const p of this.pickups) {
+      if (p.taken) continue;
+      const reach = p.kind === 'pod' ? 0.9 : 1.1;
+      if (Math.abs(p.s - this.distance) < reach && Math.abs(p.x - this.x) < 1.0 && p.y > this.y - 0.5 && p.y < this.y + h + 0.5) this.collect(p);
     }
 
-    if (this.mode === 'run' || this.mode === 'slide') {
+    if ((this.mode === 'run' || this.mode === 'slide') && !this.surging) {
       for (const hz of this.hazards) {
         if (hz.done || this.distance < hz.s0 || this.distance > hz.s1 || Math.abs(laneToX(hz.lane) - this.x) > 1) continue;
         hz.done = true;
@@ -920,10 +1039,42 @@ export class Game {
     }
   }
 
+  private collect(p: Pickup): void {
+    p.taken = true;
+    this.pickupView.detach(p);
+    if (p.kind === 'surge') {
+      this.startSurge();
+      return;
+    }
+    if (p.kind === 'pod') {
+      this.podStreak = this.time - this.lastPodTime < 0.6 ? this.podStreak + 1 : 0;
+      this.lastPodTime = this.time;
+      this.podCount++;
+      this.tracker.pods++;
+      this.score += 10 * this.multiplier;
+      this.audio.collect(this.podStreak);
+      this.effects.burst(p.x, p.y, p.s, 0x7fe3ff, 6, 1.6, 0.14, 0.35);
+      return;
+    }
+    this.podCount += POD_VALUE[p.kind];
+    this.score += 100 * this.multiplier;
+    if (p.kind === 'eco') {
+      this.tracker.ecoTokens++;
+      this.audio.eco();
+      this.hud.toast(`Eco-token +${POD_VALUE.eco}`, this.rng.pick(ECO_MESSAGES));
+      this.effects.burst(p.x, p.y, p.s, 0x3fe08a, 14, 2.2, 0.2, 0.6);
+    } else {
+      this.tracker.badges++;
+      this.audio.badge();
+      this.hud.toast(BRAND.mark ? `${BRAND.mark} badge +${POD_VALUE.badge}` : `Badge +${POD_VALUE.badge}`, 'Rare find');
+      this.effects.burst(p.x, p.y, p.s, 0xffffff, 18, 2.6, 0.22, 0.7);
+    }
+  }
+
   private stumble(reason: 'side' | 'trip' | 'slip', fromX: number): void {
     this.combo = 0;
     this.boost = 0;
-    this.penalty = 0.25;
+    this.penalty = 0.25 * (1 - this.perk('weatherproof'));
     this.stumbleTimer = 0.7;
     if (reason === 'side') {
       const l = this.lane;
@@ -963,12 +1114,13 @@ export class Game {
     const ahead = this.nextWeatherAt - this.distance;
     if (!this.forecastShown && ahead < this.speed * 3.5 && this.state !== 'menu') {
       this.forecastShown = true;
-      const shoe = bestShoeFor(this.nextWeather);
-      this.hud.forecast(this.nextWeather, shoe);
+      const slot = slotFor(this.nextWeather);
+      const shoe = shortShoeName(this.progress.state.loadout[slot]);
+      this.hud.forecast(this.nextWeather, slot, shoe);
       this.audio.forecast();
       if (!this.hintsShown.has('shoe')) {
         this.hintsShown.add('shoe');
-        this.hud.showHint(`Tap ${SHOES[shoe].shortName} below for grip`, 3);
+        this.hud.showHint(`Tap ${shoe} below for grip`, 3);
       }
     }
     if (ahead <= 0) {
@@ -995,7 +1147,11 @@ export class Game {
         return false;
       });
     this.obstacles = keep(this.obstacles, (o) => o.s1);
-    this.clouds = keep(this.clouds, (c) => c.s);
+    this.pickups = this.pickups.filter((p) => {
+      if (!p.taken && p.s >= behind) return true;
+      this.pickupView.detach(p);
+      return false;
+    });
     this.hazards = keep(this.hazards, (h) => h.s1);
   }
 
@@ -1015,6 +1171,7 @@ export class Game {
     this.camera.fov = this.baseFov();
     this.camera.updateProjectionMatrix();
     this.effects.setScale(h * this.renderer.getPixelRatio(), this.camera.fov);
+    this.pickupView.setScale(h * this.renderer.getPixelRatio(), this.camera.fov);
   }
 
   /** Drops the render resolution on devices that cannot hold ~45 fps. */
@@ -1037,11 +1194,7 @@ export class Game {
     const z = (s: number): number => d - s;
 
     for (const o of this.obstacles) o.mesh.position.z = z(o.s0);
-    for (const c of this.clouds) {
-      c.mesh.position.z = z(c.s);
-      c.mesh.position.y = c.y + Math.sin(this.time * 3 + c.s) * 0.08;
-      c.mesh.rotation.y += dt * 1.5;
-    }
+    this.pickupView.update(this.pickups, d, this.time);
     for (const h of this.hazards) h.mesh.position.z = z((h.s0 + h.s1) / 2);
 
     // Environment: blend the zone palette with the weather.
@@ -1108,7 +1261,7 @@ export class Game {
 
     this.renderer.render(this.scene, this.camera);
 
-    const intensity = this.state === 'menu' ? 0 : this.combo >= 4 ? 2 : 1;
+    const intensity = this.state === 'menu' ? 0 : this.combo >= 4 || this.surging ? 2 : 1;
     if (this.state === 'run' || this.state === 'menu') {
       this.audio.updateMusic(this.beat, this.bps, intensity, this.weather, this.state === 'run' && this.mode === 'run');
     }
@@ -1117,7 +1270,8 @@ export class Game {
         {
           score: this.score,
           multiplier: this.multiplier,
-          clouds: this.cloudCount,
+          pods: this.podCount,
+          surge: this.surgeTime / this.surgeDuration,
           zone: zone.name,
           location: locationAt(d),
           nextZone: ZONE_THEMES[(zoneIndexAt(d) + 1) % ZONE_THEMES.length]!.name,
@@ -1127,7 +1281,7 @@ export class Game {
           beat: this.beat,
           landingBeat: this.mode === 'jump' ? this.takeoffBeat + JUMP_BEATS : this.mode === 'glide' ? this.glideEnd : null,
           glideCharge: this.glideCharge,
-          shoe: this.shoe,
+          slot: SHOES[this.shoe].slot,
           lowGrip: this.grip !== 'full' && !this.isDead,
         },
         dt,

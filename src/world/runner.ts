@@ -30,6 +30,9 @@ export class Runner {
   private readonly shadow: THREE.Mesh;
   private squash = 0;
   private swing = 0;
+  private surge = 0;
+  private surgeTarget = 0;
+  private readonly glow = new THREE.Color();
 
   constructor(look: RunnerLook, shadowTexture: THREE.Texture) {
     const skin = lambert(look.skin);
@@ -194,6 +197,11 @@ export class Runner {
     this.podMat.color.setHex(c.pods);
   }
 
+  /** CloudTec Surge: 0 = off, 1 = pods fully inflated and glowing. */
+  setSurge(level: number): void {
+    this.surgeTarget = level;
+  }
+
   /** Triggers the landing squash (CloudTec pods compress). */
   land(): void {
     this.squash = 1;
@@ -240,7 +248,8 @@ export class Runner {
       // CloudTec pods compress at this foot's strike, then spring back.
       const sinceStrike = (((beat - i) % 2) + 2) % 2;
       const contact = pose === 'run' ? Math.exp(-sinceStrike * 7) : this.squash;
-      this.pods[i]!.scale.set(1 + contact * 0.25, 1 - contact * 0.55, 1);
+      const inflate = 1 + this.surge * 0.9;
+      this.pods[i]!.scale.set((1 + contact * 0.25) * inflate, (1 - contact * 0.55) * inflate, inflate);
     }
     if (pose === 'slide') {
       bodyY = 0.45;
@@ -263,6 +272,10 @@ export class Runner {
       this.ponytail.rotation.x = airborne ? 0.5 : 0.15 + Math.abs(Math.cos(phase)) * 0.15;
     }
 
+    this.surge = damp(this.surge, this.surgeTarget, 8, dt);
+    const pulse = this.surge * (0.75 + 0.25 * Math.sin(beat * Math.PI * 2));
+    this.podMat.emissive.copy(this.glow.setHex(0xd4ff3a)).multiplyScalar(pulse);
+    this.shoeAccent.emissive.copy(this.glow.setHex(0xd4ff3a)).multiplyScalar(pulse * 0.6);
     this.cloud.scale.setScalar(damp(this.cloud.scale.x, pose === 'glide' ? 1 : 0, 10, dt));
     this.cloud.position.y = 0.05;
     this.cloud.rotation.y += dt;

@@ -307,4 +307,33 @@ export class GameAudio {
     if (t === null) return;
     [12, 16, 19, 24].forEach((s, i) => this.osc('sine', hz(s + 24), t + i * 0.07, 0.35, this.env(t + i * 0.07, 0.08, 0.005, 0.3, this.sfx)));
   }
+
+  /** Shoe unlocked or upgraded. */
+  purchase(): void {
+    const t = this.now();
+    if (t === null) return;
+    [12, 19, 24, 31].forEach((n, i) => this.osc('triangle', hz(n + 24), t + i * 0.06, 0.3, this.env(t + i * 0.06, 0.1, 0.004, 0.26, this.sfx)));
+  }
+
+  /** CloudTec Surge: a rising, inflating whoosh. */
+  surge(): void {
+    const t = this.now();
+    if (t === null) return;
+    const o = this.osc('sawtooth', 110, t, 0.9, this.env(t, 0.12, 0.05, 0.8, this.sfx));
+    o.frequency.exponentialRampToValueAtTime(880, t + 0.8);
+    this.noiseBurst(t, 0.9, 'bandpass', 2400, this.env(t, 0.15, 0.3, 0.55, this.sfx));
+    [24, 28, 31, 36].forEach((n, i) => this.osc('sine', hz(n + 12), t + 0.2 + i * 0.05, 0.6, this.env(t + 0.2 + i * 0.05, 0.08, 0.01, 0.5, this.sfx)));
+  }
+
+  eco(): void {
+    const t = this.now();
+    if (t === null) return;
+    [28, 35, 40].forEach((n, i) => this.osc('sine', hz(n + 24), t + i * 0.08, 0.5, this.env(t + i * 0.08, 0.1, 0.004, 0.45, this.sfx)));
+  }
+
+  badge(): void {
+    const t = this.now();
+    if (t === null) return;
+    [24, 28, 31, 36, 40].forEach((n, i) => this.osc('triangle', hz(n + 24), t + i * 0.07, 0.6, this.env(t + i * 0.07, 0.1, 0.004, 0.55, this.sfx)));
+  }
 }
