@@ -1,4 +1,4 @@
-export type RunnerId = 'lena' | 'noah' | 'amara' | 'kenji';
+export type RunnerId = 'lena' | 'noah' | 'jonas' | 'selina' | 'amara' | 'kenji';
 export type HairStyle = 'ponytail' | 'short' | 'bun' | 'cap';
 
 export interface RunnerLook {
@@ -31,6 +31,18 @@ export const RUNNERS: readonly RunnerConfig[] = [
     name: 'Noah',
     hometown: 'Winterthur',
     look: { skin: 0xc68c64, hair: 0x2a211c, hairStyle: 'short', top: 0x1560bd, accent: 0xffffff, shorts: 0x14171c, socks: 0x1560bd },
+  },
+  {
+    id: 'jonas',
+    name: 'Jonas',
+    hometown: 'Basel',
+    look: { skin: 0xe8b996, hair: 0x5a3a22, hairStyle: 'short', top: 0xc8102e, accent: 0x0b2a5b, shorts: 0x0b2a5b, socks: 0xffffff },
+  },
+  {
+    id: 'selina',
+    name: 'Selina',
+    hometown: 'Bern',
+    look: { skin: 0xf0c4a0, hair: 0x3b2417, hairStyle: 'ponytail', top: 0xf2c200, accent: 0xd8262e, shorts: 0x16181c, socks: 0xd8262e },
   },
   {
     id: 'amara',

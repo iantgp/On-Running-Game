@@ -14,7 +14,7 @@ npm run dev:host   # open the printed network URL on your phone (same Wi-Fi)
 ## How it plays
 
 - **Swipe** ← → to switch lanes, ↑ to jump, ↓ to slide (swipe ↓ in mid-air to fast-fall). On a keyboard: arrows/WASD, Space, 1/2/3 for shoes, P to pause.
-- **Runners:** pick Lena, Noah, Amara or Kenji on the menu by swiping or using the arrows. They differ in look only.
+- **Runners:** pick Lena (Zürich), Noah (Winterthur), Jonas (Basel), Selina (Bern), Amara (Brooklyn) or Kenji (Zermatt) on the menu by swiping or using the arrows. They differ in look only.
 - **CloudTec rhythm:** the beat is tied to your stride, so the tempo rises as you speed up. Every jump lasts exactly 2 beats, and obstacles sit on the beat grid. Jump on the beat and you land on the beat.
 - **Perfect landing:** a speed boost plus glide charge. Three perfect landings fill the meter; then swipe ↑ again mid-air to **Cloud Glide** over everything.
 - **Weather:** a forecast warns you before rain or snow arrives. Tap the matching shoe for grip. In the wrong shoe, lane changes slide around, and puddles or ice make you slip. Two stumbles end the run.
