@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { BRAND } from './config/brand';
 import { GRIP_DYNAMICS, GRIP_RANK, LANES, laneToX, type GripLevel } from './config/gameplay';
 import { SHOES, bestShoeFor, type ShoeId } from './config/shoes';
 import { HAZARD_MIN_GRIP, type HazardKind, type WeatherId } from './config/weather';
@@ -26,12 +27,16 @@ const SLAM_SPEED = 22;
 const GLIDE_BEATS = 6;
 const GLIDE_H = 4.2;
 const HORIZON = 140;
-const ZONE_LEN = 900;
+/** Metres per zone; the map changes this often. */
+const ZONE_LEN = 450;
 const BODY_H = 1.7;
 const SLIDE_H = 0.75;
 const HALF_W = 0.35;
 const HALF_D = 0.25;
 const MAX_INPUT_LATE_SEC = 0.15;
+/** Glide meter gained per landing (1 = full): three perfect landings fill it. */
+const GLIDE_PER_PERFECT = 0.34;
+const GLIDE_PER_GOOD = 0.15;
 
 type Mode = 'run' | 'jump' | 'slam' | 'slide' | 'glide' | 'dead';
 type ObstacleType = 'low' | 'high' | 'block';
@@ -130,6 +135,36 @@ function windowTexture(): THREE.CanvasTexture {
   return tex;
 }
 
+interface TextTextureOptions {
+  width: number;
+  height: number;
+  /** CSS colour, or null for a transparent background. */
+  background: string | null;
+  color: string;
+  fontSize: number;
+}
+
+/** Renders a short bold label into a texture (banners, bus livery, shirt logo). */
+function textTexture(text: string, o: TextTextureOptions): THREE.CanvasTexture {
+  const c = document.createElement('canvas');
+  c.width = o.width;
+  c.height = o.height;
+  const g = c.getContext('2d')!;
+  if (o.background) {
+    g.fillStyle = o.background;
+    g.fillRect(0, 0, o.width, o.height);
+  }
+  g.fillStyle = o.color;
+  g.font = `900 ${o.fontSize}px system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif`;
+  g.textAlign = 'center';
+  g.textBaseline = 'middle';
+  g.fillText(text, o.width / 2, o.height / 2 + o.fontSize * 0.04, o.width * 0.92);
+  const tex = new THREE.CanvasTexture(c);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  tex.anisotropy = 4;
+  return tex;
+}
+
 function laneLinesTexture(): THREE.CanvasTexture {
   const c = document.createElement('canvas');
   c.width = 256;
@@ -184,6 +219,18 @@ class Runner {
     chest.position.y = 0.3;
     chest.scale.z = 0.75;
     this.torso.add(chest);
+    if (BRAND.mark) {
+      // Wordmark on the back of the shirt, facing the camera.
+      const logo = new THREE.Mesh(
+        new THREE.PlaneGeometry(0.2, 0.1),
+        new THREE.MeshBasicMaterial({
+          map: textTexture(BRAND.mark, { width: 128, height: 64, background: null, color: '#16181c', fontSize: 52 }),
+          transparent: true,
+        }),
+      );
+      logo.position.set(0, 0.42, 0.158);
+      this.torso.add(logo);
+    }
     const pelvis = new THREE.Mesh(new THREE.CapsuleGeometry(0.17, 0.08, 4, 10), shorts);
     pelvis.position.y = 0.02;
     this.torso.add(pelvis);
@@ -360,8 +407,20 @@ export class Game {
     white: lambert(0xf4f4f0),
     red: lambert(0xd8262e),
     pole: lambert(0x50555c),
-    banner: lambert(0x1f6fe0),
+    banner: lambert(0x16181c),
     glass: lambert(0x253040),
+    busBlue: lambert(0x1560bd),
+    plane: new THREE.PlaneGeometry(1, 1),
+    bannerSign: new THREE.MeshLambertMaterial({
+      map: textTexture(BRAND.mark || 'RUN', { width: 512, height: 210, background: '#16181c', color: '#f4f6f2', fontSize: 150 }),
+    }),
+    busLabel: new THREE.MeshLambertMaterial({
+      map: textTexture(BRAND.busOperator, { width: 384, height: 132, background: null, color: '#ffffff', fontSize: 104 }),
+      transparent: true,
+    }),
+    busDestination: new THREE.MeshBasicMaterial({
+      map: textTexture(BRAND.busOperator, { width: 256, height: 56, background: '#111111', color: '#ffb000', fontSize: 44 }),
+    }),
     puddle: new THREE.MeshPhongMaterial({ color: 0x5d7690, shininess: 90, specular: 0xaaaaaa, transparent: true, opacity: 0.85 }),
     ice: new THREE.MeshPhongMaterial({ color: 0xcdeeff, shininess: 120, specular: 0xffffff, transparent: true, opacity: 0.9 }),
   };
@@ -685,7 +744,7 @@ export class Game {
     const zone = ZONES[zoneIndexAt(this.distance + 300)]!;
     const options = zone.weathers.filter((w) => w !== this.weather);
     this.nextWeather = options.length > 0 ? this.rng.pick(options) : this.weather;
-    this.nextWeatherAt = this.distance + (first ? 260 : this.rng.range(220, 380));
+    this.nextWeatherAt = this.distance + (first ? 180 : this.rng.range(150, 240));
     this.forecastShown = false;
   }
 
@@ -897,9 +956,9 @@ export class Game {
     if (judgement === 'perfect') {
       this.perfects++;
       this.boost = Math.min(0.2, this.boost + 0.08 * SHOES[this.shoe].rebound[this.weather]);
-      if (!fromGlide) this.glideCharge = Math.min(1, this.glideCharge + 0.25);
+      if (!fromGlide) this.glideCharge = Math.min(1, this.glideCharge + GLIDE_PER_PERFECT);
     } else if (judgement === 'good') {
-      this.glideCharge = Math.min(1, this.glideCharge + 0.1);
+      this.glideCharge = Math.min(1, this.glideCharge + GLIDE_PER_GOOD);
     }
     this.hud.judgement(judgement, this.combo);
     if (this.glideCharge >= 1 && !fromGlide && !this.hintsShown.has('glide')) {
@@ -1017,15 +1076,33 @@ export class Game {
       box(0.12, 2.6, 0.12, this.shared.pole, -1.05, 1.3, 0);
       box(0.12, 2.6, 0.12, this.shared.pole, 1.05, 1.3, 0);
       box(2.2, 0.9, 0.08, this.shared.banner, 0, 1.65, 0);
-      box(2.2, 0.12, 0.1, this.shared.white, 0, 1.6, 0.01);
+      // Branded course banner facing the runner.
+      const sign = new THREE.Mesh(this.shared.plane, this.shared.bannerSign);
+      sign.scale.set(2.2, 0.9, 1);
+      sign.position.set(0, 1.65, 0.045);
+      group.add(sign);
     } else {
+      // Zürich-style city bus: blue body, white window band and roof, operator name on the sides.
       const len = s1 - s0;
-      const body = lambert(zone.block);
-      box(2.05, 2.6, len, body, 0, 1.6, -len / 2);
-      box(2.07, 0.8, len - 0.6, this.shared.glass, 0, 2.1, -len / 2);
-      box(1.7, 0.5, 0.1, this.shared.glass, 0, 2.2, 0.01);
-      box(2.05, 0.3, len, this.shared.pole, 0, 0.3, -len / 2);
-      if (zone.name === 'Zürich') box(0.08, 0.6, 0.8, this.shared.pole, 0, 3.2, -len / 2);
+      const mid = -len / 2;
+      box(2.05, 0.45, len, this.shared.pole, 0, 0.32, mid);
+      box(2.05, 1.15, len, this.shared.busBlue, 0, 1.12, mid);
+      box(2.05, 1.25, len, this.shared.white, 0, 2.3, mid);
+      box(2.07, 0.75, len - 0.8, this.shared.glass, 0, 2.3, mid);
+      box(1.95, 0.18, len - 0.2, this.shared.white, 0, 3.0, mid);
+      box(1.7, 0.8, 0.06, this.shared.glass, 0, 2.2, 0.01);
+      const front = new THREE.Mesh(this.shared.plane, this.shared.busDestination);
+      front.scale.set(1.3, 0.28, 1);
+      front.position.set(0, 2.78, 0.05);
+      group.add(front);
+      for (const side of [-1, 1]) {
+        const label = new THREE.Mesh(this.shared.plane, this.shared.busLabel);
+        label.scale.set(1.6, 0.55, 1);
+        label.rotation.y = side * (Math.PI / 2);
+        label.position.set(side * 1.035, 1.1, Math.max(mid, -2.2));
+        group.add(label);
+      }
+      if (zone.name === 'Zürich') box(0.08, 0.6, 0.8, this.shared.pole, 0, 3.4, mid);
     }
     group.position.set(laneToX(lane), 0, 0);
     this.scene.add(group);
@@ -1262,6 +1339,8 @@ export class Game {
           multiplier: this.multiplier,
           clouds: this.cloudCount,
           zone: zone.name,
+          nextZone: ZONES[(zoneIndexAt(d) + 1) % ZONES.length]!.name,
+          zoneProgress: (d % ZONE_LEN) / ZONE_LEN,
           distance: d,
           bpm: this.bps * 60,
           beat: this.beat,

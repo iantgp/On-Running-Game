@@ -1,3 +1,4 @@
+import { BRAND } from './config/brand';
 import { SHOES, SHOE_ORDER, type ShoeId } from './config/shoes';
 import type { WeatherId } from './config/weather';
 import type { Judgement } from './sim/rhythm';
@@ -17,6 +18,9 @@ export interface HudFrame {
   multiplier: number;
   clouds: number;
   zone: string;
+  nextZone: string;
+  /** 0..1 progress through the current zone. */
+  zoneProgress: number;
   distance: number;
   bpm: number;
   beat: number;
@@ -50,6 +54,8 @@ export class Hud {
   private readonly multEl: HTMLElement;
   private readonly cloudsEl: HTMLElement;
   private readonly zoneEl: HTMLElement;
+  private readonly zoneFill: HTMLElement;
+  private readonly nextEl: HTMLElement;
   private readonly msgEl: HTMLElement;
   private readonly hintEl: HTMLElement;
   private readonly forecastEl: HTMLElement;
@@ -70,7 +76,8 @@ export class Hud {
     root.innerHTML = `
       <div class="hud hidden">
         <div class="top">
-          <div><div class="score">0</div><div class="sub zone"></div></div>
+          <div class="left"><div class="score">0</div><div class="sub zone"></div>
+            <div class="zonebar"><i></i></div><div class="sub next"></div></div>
           <div class="right">
             <button class="pause" aria-label="Pause">II</button>
             <div class="pill">☁ <span class="clouds">0</span></div>
@@ -87,7 +94,8 @@ export class Hud {
         </div>
       </div>
       <div class="screen menu">
-        <div class="title">CloudTec<span>INFINITE RUNNER</span></div>
+        <div class="brand"></div>
+        <div class="title"><b class="game-title"></b><span>INFINITE RUNNER</span></div>
         <div class="route">Zürich → Swiss Alps → New York</div>
         <div class="howto">
           <b>Swipe</b> ← → to switch lanes, ↑ to jump, ↓ to slide.<br/>
@@ -118,6 +126,12 @@ export class Hud {
     this.multEl = q('.mult');
     this.cloudsEl = q('.clouds');
     this.zoneEl = q('.zone');
+    this.zoneFill = q('.zonebar i');
+    this.nextEl = q('.next');
+    const brand = q('.brand');
+    brand.textContent = BRAND.mark;
+    brand.hidden = BRAND.mark.length === 0;
+    q('.game-title').textContent = BRAND.title;
     this.msgEl = q('.center-msg');
     this.hintEl = q('.hint');
     this.forecastEl = q('.forecast');
@@ -254,6 +268,9 @@ export class Hud {
     const zone = `${frame.zone} · ${(frame.distance / 1000).toFixed(2)} km · ${Math.round(frame.bpm)} spm`;
     if (zone !== this.last.zone) this.zoneEl.textContent = zone;
     this.last = { score, mult: frame.multiplier, clouds: frame.clouds, zone };
+    this.zoneFill.style.transform = `scaleX(${frame.zoneProgress})`;
+    const next = `Next: ${frame.nextZone}`;
+    if (this.nextEl.textContent !== next) this.nextEl.textContent = next;
 
     // Beat bar: ticks slide in from both edges and meet the CloudTec pod on each beat.
     const nextBeat = Math.ceil(frame.beat);
