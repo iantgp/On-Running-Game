@@ -230,6 +230,7 @@ export class Game {
   private readonly lookBack = new THREE.Vector3();
   private readonly tint = { rain: 0, snow: 0 };
   private chaseX = 0;
+  private camRoll = 0;
   private chase = 0;
   private markingsZone: ZoneKey = 'zurich';
   private slowFrames = 0;
@@ -1084,7 +1085,8 @@ export class Game {
     // Camera: a front-on tracking shot on the menu, swinging to the chase camera in a run.
     this.chase = damp(this.chase, this.state === 'menu' ? 0 : 1, 3.2, dt);
     const k = this.chase * this.chase * (3 - 2 * this.chase);
-    this.chaseX = damp(this.chaseX, this.x * 0.8, 8, dt);
+    // Follow lane changes gently so the view glides instead of jolting.
+    this.chaseX = damp(this.chaseX, this.x * 0.6, 4.5, dt);
     this.camFront.set(this.x - 0.55, 1.45, -3.5);
     this.camBack.set(this.chaseX, 3.4 + this.y * 0.55, 6.6 + this.boost * 2);
     this.camera.position.lerpVectors(this.camFront, this.camBack, k);
@@ -1092,7 +1094,8 @@ export class Game {
     this.lookFront.set(this.x, 1.05, 0);
     this.lookBack.set(this.chaseX * 0.9, 1.2 + this.y * 0.35, -10);
     this.camera.lookAt(this.lookFront.lerp(this.lookBack, k));
-    this.camera.rotation.z += -this.vx * 0.006 * k;
+    this.camRoll = damp(this.camRoll, clamp(-this.vx * 0.0012, -0.02, 0.02), 5, dt);
+    this.camera.rotation.z += this.camRoll * k;
     const fovTarget = this.baseFov() + this.boost * 30;
     if (Math.abs(this.camera.fov - fovTarget) > 0.05) {
       this.camera.fov = damp(this.camera.fov, fovTarget, 4, dt);
